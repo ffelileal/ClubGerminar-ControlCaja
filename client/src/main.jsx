@@ -39,6 +39,7 @@ function Login({ onLogin, config }) {
 
 function Shell({ yo, config, onLogout }) {
   const [conectado, setConectado] = useState(true);
+  const [menuMovil, setMenuMovil] = useState(false);
   useEffect(() => onConexion(setConectado), []);
   const nav = [
     ['/', 'Operación', '1'], ['/caja', 'Caja', '2'], ['/dashboard', 'Dashboard', '3'],
@@ -46,12 +47,20 @@ function Shell({ yo, config, onLogout }) {
   ];
   return <div className="app">
     {!conectado && <div className="banner bad" style={{ position: 'fixed', zIndex: 200, left: 220, right: 0, top: 0 }}>Sin conexión con el servidor</div>}
-    <aside className="side">
+    <header className="mobile-header">
+      <button className="menu-hamburguesa" onClick={() => setMenuMovil((v) => !v)} aria-label="Abrir menú" aria-expanded={menuMovil}>
+        <span></span><span></span><span></span>
+      </button>
+      <img src="/club-germinar.png" alt="" />
+      <div><strong>{config.establecimiento || 'Establecimiento'}</strong>{config.direccion && <small>{config.direccion}</small>}</div>
+    </header>
+    {menuMovil && <button className="menu-movil-fondo" aria-label="Cerrar menú" onClick={() => setMenuMovil(false)} />}
+    <aside className={`side ${menuMovil ? 'menu-movil-abierto' : ''}`}>
       <div className="brand establishment-brand">
         <img src="/club-germinar.png" alt="" />
         <span>{config.establecimiento || 'Establecimiento'}<small>{config.direccion || ''}</small></span>
       </div>
-      <nav className="nav">{nav.map(([to, label, key]) => <NavLink key={to} to={to} end={to === '/'}>{label}<span className="key">{key}</span></NavLink>)}</nav>
+      <nav className="nav">{nav.map(([to, label, key]) => <NavLink key={to} to={to} end={to === '/'} onClick={() => setMenuMovil(false)}>{label}<span className="key">{key}</span></NavLink>)}</nav>
       <div className="bottom"><div className="who"><b>{yo.nombre}</b>{yo.rol}</div><button onClick={onLogout}>Cerrar sesión</button></div>
     </aside>
     <main className="main"><Routes>
@@ -234,21 +243,216 @@ function Kpi({label,value,accent}) { return <div className={`kpi ${accent?'accen
 function Table({headers,rows}) { return <div className="tbl-wrap"><table className="tbl"><thead><tr>{headers.map(h=><th key={h}>{h}</th>)}</tr></thead><tbody>{rows.length?rows.map((r,i)=><tr key={i}>{r.map((v,j)=><td key={j}>{v}</td>)}</tr>):<tr><td colSpan={headers.length} className="empty">Sin datos</td></tr>}</tbody></table></div>; }
 
 function Dashboard() {
-  const d = useAsync(() => api('/dashboard'), []);
+  const hoyIso = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  const sumar = (d, dias) => { const x = new Date(d+'T12:00:00'); x.setDate(x.getDate()+dias); return hoyIso(x); };
+  const inicioSemana = (d) => { const x = new Date(d+'T12:00:00'); const dia = (x.getDay()+6)%7; x.setDate(x.getDate()-dia); return hoyIso(x); };
+  const inicioMes = (d) => `${d.slice(0,7)}-01`;
+  const finMes = (d) => { const x = new Date(d+'T12:00:00'); x.setMonth(x.getMonth()+1,0); return hoyIso(x); };
+  const hoyActual = hoyIso();
+  const [rango,setRango] = useState({ desde: sumar(hoyActual,-29), hasta:hoyActual });
+  const [comparar,setComparar] = useState(false);
+  const [rangoComp,setRangoComp] = useState({ desde: sumar(rango.desde,-30), hasta: sumar(rango.desde,-1) });
+  const [rapido,setRapido] = useState('30');
+  const [orden,setOrden] = useState({ campo:'fecha', dir:-1 });
+  const [pagina,setPagina] = useState(1);
+  const [porPagina,setPorPagina] = useState(15);
+  const [tabActividad,setTabActividad] = useState('resumen');
+  const [diaSeleccionado,setDiaSeleccionado] = useState('');
+  const query = qs({
+    desde:rango.desde,
+    hasta:rango.hasta,
+    ...(comparar ? { compararDesde:rangoComp.desde, compararHasta:rangoComp.hasta } : {}),
+  });
+  const d = useAsync(() => api(`/dashboard${query}`), [query]);
   const data = d.data;
-  const serieRef = useRef(null); const horaRef = useRef(null);
+  const detalleDia = useAsync(
+    () => diaSeleccionado ? api(`/dashboard/dia/${diaSeleccionado}`) : Promise.resolve(null),
+    [diaSeleccionado],
+  );
+  const serieRef = useRef(null);
+  const personasRef = useRef(null);
+  const medioRef = useRef(null);
+  const horaRef = useRef(null);
+
+  function aplicarRapido(tipo) {
+    setRapido(tipo);
+    let desde=rango.desde, hasta=hoyActual;
+    if(tipo==='hoy') { desde=hoyActual; hasta=hoyActual; }
+    if(tipo==='ayer') { desde=sumar(hoyActual,-1); hasta=desde; }
+    if(tipo==='7') desde=sumar(hoyActual,-6);
+    if(tipo==='30') desde=sumar(hoyActual,-29);
+    if(tipo==='semana') { desde=inicioSemana(hoyActual); hasta=hoyActual; }
+    if(tipo==='semanaAnterior') { const actual=inicioSemana(hoyActual); desde=sumar(actual,-7); hasta=sumar(actual,-1); }
+    if(tipo==='mes') { desde=inicioMes(hoyActual); hasta=hoyActual; }
+    if(tipo==='mesAnterior') { const inicio=inicioMes(hoyActual); desde=inicioMes(sumar(inicio,-1)); hasta=finMes(sumar(inicio,-1)); }
+    if(tipo==='ano') { desde=`${hoyActual.slice(0,4)}-01-01`; hasta=hoyActual; }
+    if(tipo==='anoAnterior') { const ano=Number(hoyActual.slice(0,4))-1; desde=`${ano}-01-01`; hasta=`${ano}-12-31`; }
+    setRango({desde,hasta});
+    setRangoComp({desde:sumar(desde,-(Math.round((new Date(hasta+'T12:00:00')-new Date(desde+'T12:00:00'))/86400000)+1)),hasta:sumar(desde,-1)});
+  }
+
   useEffect(() => {
     if (!data) return;
     const charts = [];
-    if (serieRef.current) { charts.push(new Chart(serieRef.current,{type:'line',data:{labels:data.serie.map(r=>r.fecha.slice(5)),datasets:[{label:'Personas',data:data.serie.map(r=>r.personas),borderColor:'#134e4a',backgroundColor:'#e3efed',tension:.25,fill:true}]},options:{responsive:true,maintainAspectRatio:false}})); }
-    if (horaRef.current) { charts.push(new Chart(horaRef.current,{type:'bar',data:{labels:data.porHora.map(r=>`${r.hora}:00`),datasets:[{label:'Ingresos',data:data.porHora.map(r=>r.grupos),backgroundColor:'#1d6b65'}]},options:{responsive:true,maintainAspectRatio:false}})); }
+    if (serieRef.current) {
+      const etiquetas = data.serie.map((r) => r.fecha.slice(5));
+      const datasets = [{label:'Recaudación',data:data.serie.map(r=>r.total/100),borderColor:'#134e4a',backgroundColor:'rgba(19,78,74,.08)',tension:.25,fill:true}];
+      if (data.comparado) datasets.push({label:'Período comparado',data:data.comparado.serie.map(r=>r.total/100),borderColor:'#9a5b00',borderDash:[5,5],tension:.25,fill:false});
+      charts.push(new Chart(serieRef.current,{type:'line',data:{labels:etiquetas,datasets},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:true}},scales:{y:{beginAtZero:true}}}}));
+    }
+    if (personasRef.current) charts.push(new Chart(personasRef.current,{type:'bar',data:{labels:data.serie.map(r=>r.fecha.slice(5)),datasets:[{label:'Personas',data:data.serie.map(r=>r.personas),backgroundColor:'#1d6b65'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true}}}}));
+    if (medioRef.current) charts.push(new Chart(medioRef.current,{type:'doughnut',data:{labels:['Efectivo','Transferencia'],datasets:[{data:[data.recaudacion.efectivo/100,data.recaudacion.transferencia/100],backgroundColor:['#134e4a','#c28a2f']}]},options:{responsive:true,maintainAspectRatio:false,cutout:'68%',plugins:{legend:{position:'bottom'}}}}));
+    if (horaRef.current) charts.push(new Chart(horaRef.current,{type:'bar',data:{labels:data.porHora.map(r=>`${String(r.hora).padStart(2,'0')}:00`),datasets:[{label:'Ingresos',data:data.porHora.map(r=>r.grupos),backgroundColor:'#6a8f8a'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true}}}}));
     return () => charts.forEach(c=>c.destroy());
   }, [data]);
-  return <><Topbar title="Dashboard" /><div className="content">{data&&<>
-    <div className="grid g4"><Kpi label="Dentro ahora" value={`${data.dentro.personas} personas`} /><Kpi label="Ingresos hoy" value={`${data.ingresos.grupos} grupos`} /><Kpi label="Personas ingresadas" value={`${data.ingresos.personas}`} /><Kpi label="Egresos hoy" value={`${data.egresos.grupos}`} /></div>
-    <div className="spacer" /><div className="grid g4"><Kpi label="Cobrado hoy" value={$(data.recaudacion.total)} accent /><Kpi label="Efectivo" value={$(data.recaudacion.efectivo)} /><Kpi label="Transferencias" value={$(data.recaudacion.transferencia)} /><Kpi label="Comprobantes" value={`${data.comprobantesGenerados}`} /></div>
-    <div className="spacer" /><div className="grid g2"><div className="panel"><div className="panel-h"><h2>Ingresos por día</h2></div><div className="panel-b chart-box"><canvas ref={serieRef}/></div></div><div className="panel"><div className="panel-h"><h2>Ingresos por hora</h2></div><div className="panel-b chart-box"><canvas ref={horaRef}/></div></div></div>
-  </>}</div></>;
+
+  function exportar(formato) {
+    window.open(`/api/dashboard/exportar${query}&formato=${formato}`, '_blank');
+  }
+
+  function KpiComparado({label,value,indicador,accent,descripcion}) {
+    const diff = indicador?.diferencia || 0;
+    const pct = indicador?.porcentaje;
+    const positive = diff > 0;
+    return <div className={`kpi dashboard-kpi ${accent?'accent':''}`}>
+      <div className="lbl" title={descripcion}>{label}</div>
+      <div className="val">{value}</div>
+      {comparar && <div className={`comparacion ${positive?'up':'down'}`}>
+        <span>{diff === 0 ? 'Sin cambio' : `${positive?'▲':'▼'} ${typeof value==='string' && value.startsWith('$') ? $(Math.abs(diff)) : Math.abs(diff)}`}</span>
+        {pct != null && <small>{diff === 0 ? '0% vs anterior' : `${positive ? '+' : '-'}${Math.abs(pct).toFixed(1)}% vs anterior`}</small>}
+      </div>}
+    </div>;
+  }
+
+  let filas = [...(data?.serie || [])];
+  filas.sort((a,b) => {
+    let av=a[orden.campo] ?? '', bv=b[orden.campo] ?? '';
+    if(typeof av==='string') av=av.localeCompare(bv);
+    else av=av-bv;
+    return av*orden.dir;
+  });
+  useEffect(() => { setPagina(1); }, [query, porPagina, orden.campo, orden.dir]);
+  const totalFilas = filas.length;
+  const cantidadPagina = porPagina === 0 ? totalFilas : porPagina;
+  const totalPaginas = cantidadPagina ? Math.max(1, Math.ceil(totalFilas/cantidadPagina)) : 1;
+  const paginaActual = Math.min(pagina, totalPaginas);
+  const filasPagina = porPagina === 0 ? filas : filas.slice((paginaActual-1)*porPagina, paginaActual*porPagina);
+
+  return <><Topbar title="Dashboard" /><div className="content dashboard">
+    <div className="dashboard-toolbar">
+      <div className="dashboard-filtros">
+        {[['hoy','Hoy'],['ayer','Ayer'],['7','Últimos 7 días'],['30','Últimos 30 días'],['semana','Esta semana'],['semanaAnterior','Semana anterior'],['mes','Este mes'],['mesAnterior','Mes anterior'],['ano','Este año'],['anoAnterior','Año anterior']].map(([v,t]) =>
+          <button key={v} className={`btn sm ${rapido===v?'active':''}`} onClick={()=>aplicarRapido(v)}>{t}</button>)}
+      </div>
+      <div className="dashboard-periodo">
+        <label className="f">Desde<input className="input" type="date" value={rango.desde} onChange={(e)=>{setRapido('personalizado');setRango({...rango,desde:e.target.value})}} /></label>
+        <label className="f">Hasta<input className="input" type="date" value={rango.hasta} onChange={(e)=>{setRapido('personalizado');setRango({...rango,hasta:e.target.value})}} /></label>
+        <label className="check"><input type="checkbox" checked={comparar} onChange={(e)=>setComparar(e.target.checked)} />Comparar período</label>
+      </div>
+      {comparar && <div className="dashboard-periodo comparado">
+        <span>Período comparado</span>
+        <label className="f">Desde<input className="input" type="date" value={rangoComp.desde} onChange={(e)=>setRangoComp({...rangoComp,desde:e.target.value})}/></label>
+        <label className="f">Hasta<input className="input" type="date" value={rangoComp.hasta} onChange={(e)=>setRangoComp({...rangoComp,hasta:e.target.value})}/></label>
+      </div>}
+      <div className="dashboard-export">
+        <button className="btn sm" onClick={()=>exportar('xlsx')}>Excel</button>
+        <button className="btn sm" onClick={()=>exportar('csv')}>CSV</button>
+        <button className="btn sm" onClick={()=>exportar('pdf')}>PDF</button>
+      </div>
+    </div>
+    {d.cargando && <div className="empty">Actualizando información...</div>}
+    {data && <>
+      <section className="dashboard-section"><h2>Resumen general</h2><div className="grid g4">
+        <KpiComparado label="Recaudación total" value={$(data.recaudacion.total)} indicador={data.indicadores.recaudacion} accent descripcion="Pagos confirmados en el período"/>
+        <KpiComparado label="Personas ingresadas" value={data.ingresos.personas} indicador={data.indicadores.personas} descripcion="Suma de personas de todos los grupos"/>
+        <KpiComparado label="Dentro ahora" value={data.dentro.personas} descripcion="Cantidad actual dentro del establecimiento"/>
+        <KpiComparado label="Egresos" value={data.egresos.personas} indicador={data.indicadores.egresos} descripcion="Total de personas que finalizaron su visita"/>
+      </div></section>
+      <section className="dashboard-section"><h2>Rendimiento económico</h2><div className="grid g4">
+        <KpiComparado label="Efectivo" value={$(data.recaudacion.efectivo)} indicador={data.indicadores.efectivo}/>
+        <KpiComparado label="Transferencias" value={$(data.recaudacion.transferencia)} indicador={data.indicadores.transferencia}/>
+        <KpiComparado label="Operaciones cobradas" value={data.recaudacion.operaciones} indicador={data.indicadores.operaciones}/>
+        <KpiComparado label="Promedio por operación" value={$(data.indicadores.promedioOperacion.actual)} indicador={data.indicadores.promedioOperacion}/>
+      </div></section>
+      <section className="dashboard-grid">
+        <div className="panel"><div className="panel-h"><h2>Evolución de la recaudación</h2></div><div className="panel-b chart-box"><canvas ref={serieRef}/></div></div>
+        <div className="panel"><div className="panel-h"><h2>Medios de pago</h2></div><div className="panel-b payment-chart"><canvas ref={medioRef}/><div className="payment-legend"><div><span>Efectivo</span><b>{$(data.recaudacion.efectivo)}</b></div><div><span>Transferencia</span><b>{$(data.recaudacion.transferencia)}</b></div></div></div></div>
+      </section>
+      <section className="dashboard-grid">
+        <div className="panel"><div className="panel-h"><h2>Personas ingresadas</h2></div><div className="panel-b chart-box"><canvas ref={personasRef}/></div></div>
+        <div className="panel"><div className="panel-h"><h2>Horarios de mayor actividad</h2></div><div className="panel-b chart-box"><canvas ref={horaRef}/></div></div>
+      </section>
+      <section className="dashboard-grid">
+        <div className="panel activity-panel">
+          <div className="panel-h"><h2>Actividad por día</h2></div>
+          <div className="activity-tabs tabs">
+            <button className={tabActividad==='resumen'?'active':''} onClick={()=>setTabActividad('resumen')}>Resumen diario</button>
+            <button className={tabActividad==='operaciones'?'active':''} onClick={()=>setTabActividad('operaciones')}>Operaciones</button>
+            <button className={tabActividad==='tarifas'?'active':''} onClick={()=>setTabActividad('tarifas')}>Tarifas</button>
+          </div>
+          {tabActividad==='resumen' && <>
+            <div className="activity-toolbar">
+              <label className="f">Filas por página
+                <select className="input" value={porPagina} onChange={(e)=>setPorPagina(Number(e.target.value))}>
+                  <option value="7">7 días</option>
+                  <option value="15">15 días</option>
+                  <option value="30">30 días</option>
+                  <option value="50">50 días</option>
+                  <option value="0">Todos</option>
+                </select>
+              </label>
+              <span>{totalFilas ? `${((paginaActual-1)*cantidadPagina)+1}-${Math.min(paginaActual*cantidadPagina,totalFilas)} de ${totalFilas}` : '0 días'}</span>
+            </div>
+            <div className="tbl-wrap">
+              <table className="tbl"><thead><tr>
+                {[['fecha','Fecha'],['operaciones','Operaciones'],['personas','Personas'],['efectivo','Efectivo'],['transferencia','Transferencia'],['total','Total']].map(([campo,t]) =>
+                  <th key={campo} className={campo==='operaciones'||campo==='personas'||campo==='efectivo'||campo==='transferencia'||campo==='total'?'num':''}>
+                    <button className="sort-button" onClick={()=>setOrden({campo,dir:orden.campo===campo?-orden.dir:1})}>{t}{orden.campo===campo?(orden.dir===1?' ▲':' ▼'):''}</button>
+                  </th>)}
+              </tr></thead><tbody>{filasPagina.map(r=>
+                <tr key={r.fecha} className="click" onClick={()=>{setDiaSeleccionado(r.fecha);setTabActividad('operaciones')}}>
+                  <td>{r.fecha.split('-').reverse().join('/')}</td><td className="num">{r.operaciones}</td><td className="num">{r.personas}</td>
+                  <td className="num">{$(r.efectivo)}</td><td className="num">{$(r.transferencia)}</td><td className="num"><b>{$(r.total)}</b></td>
+                </tr>)}</tbody></table>
+            </div>
+            {totalPaginas>1 && <div className="activity-pager">
+              <button className="btn sm" disabled={paginaActual<=1} onClick={()=>setPagina(paginaActual-1)}>Anterior</button>
+              <span>Página {paginaActual} de {totalPaginas}</span>
+              <button className="btn sm" disabled={paginaActual>=totalPaginas} onClick={()=>setPagina(paginaActual+1)}>Siguiente</button>
+            </div>}
+          </>}
+          {tabActividad==='operaciones' && <div className="activity-detail">
+            <label className="f">Fecha seleccionada
+              <input className="input" type="date" value={diaSeleccionado || rango.hasta} onChange={(e)=>setDiaSeleccionado(e.target.value)} />
+            </label>
+            {detalleDia.data && <>
+              <div className="grid g4 activity-detail-kpis">
+                <div className="kpi"><div className="lbl">Operaciones</div><div className="val">{detalleDia.data.resumen.operaciones}</div></div>
+                <div className="kpi"><div className="lbl">Personas</div><div className="val">{detalleDia.data.resumen.personas}</div></div>
+                <div className="kpi"><div className="lbl">Efectivo</div><div className="val">{$(detalleDia.data.resumen.efectivo)}</div></div>
+                <div className="kpi"><div className="lbl">Total</div><div className="val">{$(detalleDia.data.resumen.recaudado)}</div></div>
+              </div>
+              <div className="tbl-wrap"><Table headers={['Comprobante','Hora','Titular','Personas','Tarifa','Medio','Importe','Operador']} rows={detalleDia.data.rows.map(r=>[
+                nroOrden(r.numero),hora(r.fecha),r.titular,r.cantidad,r.tarifa||'—',r.medio,$(r.importe),r.operador,
+              ])}/></div>
+            </>}
+          </div>}
+          {tabActividad==='tarifas' && <div className="tbl-wrap">
+            <Table headers={['Tarifa','Usos','Recaudado']} rows={(data.tarifasMasUsadas||[]).map(r=>[r.nombre,r.usos,$(r.total)])}/>
+          </div>}
+        </div>
+        <div className="panel">
+          <div className="panel-h"><h2>Información útil</h2></div>
+          <div className="panel-b activity-summary">
+            <div><span>Días con actividad</span><b>{filas.filter(r=>r.operaciones>0).length}</b></div>
+            <div><span>Operaciones del período</span><b>{data.recaudacion.operaciones}</b></div>
+            <div><span>Personas ingresadas</span><b>{data.ingresos.personas}</b></div>
+            <div><span>Promedio diario</span><b>{$(filas.length ? Math.round(data.recaudacion.total/filas.length):0)}</b></div>
+          </div>
+        </div>
+      </section>
+    </>}
+  </div></>;
 }
 
 function Historial() {

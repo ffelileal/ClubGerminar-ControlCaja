@@ -4,49 +4,131 @@ import { ahora, hoy, sumarDias, err } from '../util.js';
 import { auditar } from './config.js';
 
 // ---------------- Dashboard ----------------
-export function dashboard(db, dias = 30) {
-  const d = hoy();
-  const desde = sumarDias(d, -(dias - 1));
+function rangoValido(desde, hasta, diasFallback = 30) {
+  const hoyIso = hoy();
+  const desdeFinal = /^\d{4}-\d{2}-\d{2}$/.test(String(desde || '')) ? String(desde).slice(0, 10) : sumarDias(hoyIso, -(diasFallback - 1));
+  const hastaFinal = /^\d{4}-\d{2}-\d{2}$/.test(String(hasta || '')) ? String(hasta).slice(0, 10) : hoyIso;
+  if (desdeFinal > hastaFinal) return { desde: hastaFinal, hasta: desdeFinal };
+  return { desde: desdeFinal, hasta: hastaFinal };
+}
+
+function datosDashboard(db, desde, hasta) {
   const dentro = db.prepare("SELECT COUNT(*) AS grupos, COALESCE(SUM(cantidad),0) AS personas FROM visitas WHERE estado='DENTRO'").get();
-  const ingresos = db.prepare("SELECT COUNT(*) AS grupos, COALESCE(SUM(cantidad),0) AS personas FROM visitas WHERE substr(ingreso,1,10)=? AND estado<>'ANULADA'").get(d);
-  const egresos = db.prepare("SELECT COUNT(*) AS grupos, COALESCE(SUM(cantidad),0) AS personas FROM visitas WHERE substr(egreso,1,10)=? AND estado='FINALIZADA'").get(d);
+  const ingresos = db.prepare(`SELECT COUNT(*) AS grupos,
+      COALESCE(SUM(cantidad),0) AS personas
+    FROM visitas WHERE substr(ingreso,1,10) BETWEEN ? AND ? AND estado<> 'ANULADA'`).get(desde, hasta);
+  const egresos = db.prepare(`SELECT COUNT(*) AS grupos,
+      COALESCE(SUM(cantidad),0) AS personas
+    FROM visitas WHERE substr(egreso,1,10) BETWEEN ? AND ? AND estado='FINALIZADA'`).get(desde, hasta);
   const rec = db.prepare(`SELECT COUNT(*) AS operaciones,
       COALESCE(SUM(importe),0) AS total,
       COALESCE(SUM(CASE WHEN medio='EFECTIVO' THEN importe END),0) AS efectivo,
-      COALESCE(SUM(CASE WHEN medio='TRANSFERENCIA' THEN importe END),0) AS transferencia,
-      COALESCE(SUM(CASE WHEN estado='PENDIENTE' THEN importe END),0) AS pendiente
-    FROM ordenes WHERE substr(fecha,1,10)=? AND estado<>'ANULADA'`).get(d);
+      COALESCE(SUM(CASE WHEN medio='TRANSFERENCIA' THEN importe END),0) AS transferencia
+    FROM ordenes
+    WHERE substr(fecha,1,10) BETWEEN ? AND ? AND estado='PAGADO'`).get(desde, hasta);
+  const pendientes = db.prepare(`SELECT COUNT(*) AS cantidad,
+      COALESCE(SUM(importe),0) AS total
+    FROM ordenes WHERE substr(fecha,1,10) BETWEEN ? AND ? AND estado='PENDIENTE'`).get(desde, hasta);
+  const comprobantes = db.prepare(`SELECT COUNT(*) AS cantidad
+    FROM comprobantes WHERE substr(creado,1,10) BETWEEN ? AND ?`).get(desde, hasta);
 
-  const horas = Array.from({ length: 24 }, (_, h) => ({ hora: h, grupos: 0, personas: 0 }));
-  for (const r of db.prepare("SELECT CAST(substr(ingreso,12,2) AS INTEGER) AS h, COUNT(*) AS g, SUM(cantidad) AS p FROM visitas WHERE substr(ingreso,1,10)=? AND estado<>'ANULADA' GROUP BY h").all(d)) {
-    horas[r.h] = { hora: r.h, grupos: r.g, personas: r.p };
+  const porHora = Array.from({ length: 24 }, (_, hora) => ({ hora, grupos: 0, personas: 0 }));
+  for (const r of db.prepare(`SELECT CAST(substr(ingreso,12,2) AS INTEGER) AS hora,
+      COUNT(*) AS grupos, COALESCE(SUM(cantidad),0) AS personas
+    FROM visitas
+    WHERE substr(ingreso,1,10) BETWEEN ? AND ? AND estado<> 'ANULADA'
+    GROUP BY hora`).all(desde, hasta)) {
+    porHora[r.hora] = { hora: r.hora, grupos: r.grupos, personas: r.personas };
   }
 
   const serie = [];
-  const idx = {};
+  const desdeDia = new Date(`${desde}T12:00:00`);
+  const hastaDia = new Date(`${hasta}T12:00:00`);
+  const dias = Math.min(3660, Math.round((hastaDia - desdeDia) / 86400000) + 1);
   for (let i = 0; i < dias; i++) {
-    const f = sumarDias(desde, i);
-    idx[f] = serie.length;
-    serie.push({ fecha: f, personas: 0, grupos: 0, efectivo: 0, transferencia: 0 });
+    const dt = new Date(desdeDia);
+    dt.setDate(desdeDia.getDate() + i);
+    const f = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+    serie.push({ fecha: f, operaciones: 0, personas: 0, grupos: 0, efectivo: 0, transferencia: 0, total: 0 });
   }
-  for (const r of db.prepare("SELECT substr(ingreso,1,10) AS f, COUNT(*) AS g, SUM(cantidad) AS p FROM visitas WHERE substr(ingreso,1,10) BETWEEN ? AND ? AND estado<>'ANULADA' GROUP BY f").all(desde, d)) {
-    if (r.f in idx) Object.assign(serie[idx[r.f]], { grupos: r.g, personas: r.p });
+  const idx = Object.fromEntries(serie.map((r, i) => [r.fecha, i]));
+  for (const r of db.prepare(`SELECT substr(ingreso,1,10) AS fecha,
+      COUNT(*) AS grupos, COALESCE(SUM(cantidad),0) AS personas
+    FROM visitas WHERE substr(ingreso,1,10) BETWEEN ? AND ? AND estado<> 'ANULADA'
+    GROUP BY fecha`).all(desde, hasta)) {
+    if (r.fecha in idx) Object.assign(serie[idx[r.fecha]], { grupos: r.grupos, personas: r.personas });
   }
-  for (const r of db.prepare(`SELECT substr(fecha,1,10) AS f,
-      COALESCE(SUM(CASE WHEN medio='EFECTIVO' THEN importe END),0) AS e,
-      COALESCE(SUM(CASE WHEN medio='TRANSFERENCIA' THEN importe END),0) AS t
-      FROM ordenes WHERE substr(fecha,1,10) BETWEEN ? AND ? AND estado<>'ANULADA' GROUP BY f`).all(desde, d)) {
-    if (r.f in idx) Object.assign(serie[idx[r.f]], { efectivo: r.e, transferencia: r.t });
+  for (const r of db.prepare(`SELECT substr(fecha,1,10) AS fecha,
+      COUNT(*) AS operaciones,
+      COALESCE(SUM(CASE WHEN medio='EFECTIVO' THEN importe ELSE 0 END),0) AS efectivo,
+      COALESCE(SUM(CASE WHEN medio='TRANSFERENCIA' THEN importe ELSE 0 END),0) AS transferencia,
+      COALESCE(SUM(importe),0) AS total
+    FROM ordenes
+    WHERE substr(fecha,1,10) BETWEEN ? AND ? AND estado='PAGADO'
+    GROUP BY fecha`).all(desde, hasta)) {
+    if (r.fecha in idx) Object.assign(serie[idx[r.fecha]], {
+      operaciones: r.operaciones, efectivo: r.efectivo, transferencia: r.transferencia, total: r.total,
+    });
   }
-  const comprobantes = db.prepare("SELECT COUNT(*) AS cantidad FROM comprobantes WHERE substr(creado,1,10)=?").get(d);
-  const pagosPendientes = db.prepare("SELECT COUNT(*) AS cantidad, COALESCE(SUM(importe),0) AS total FROM ordenes WHERE estado='PENDIENTE'").get();
-  const tarifasMasUsadas = db.prepare(`SELECT COALESCE(tarifa_nombre,'Tarifa') AS nombre, COUNT(*) AS usos
-    FROM ordenes WHERE estado <> 'ANULADA' GROUP BY COALESCE(tarifa_nombre,'Tarifa') ORDER BY usos DESC LIMIT 10`).all();
+
+  const tarifasMasUsadas = db.prepare(`SELECT COALESCE(tarifa_nombre,'Tarifa') AS nombre,
+      COUNT(*) AS usos, COALESCE(SUM(importe),0) AS total
+    FROM ordenes
+    WHERE substr(fecha,1,10) BETWEEN ? AND ? AND estado='PAGADO'
+    GROUP BY COALESCE(tarifa_nombre,'Tarifa')
+    ORDER BY usos DESC, total DESC LIMIT 10`).all(desde, hasta);
+
   return {
-    fecha: d, dentro, ingresos, egresos, recaudacion: rec, porHora: horas, serie,
+    dentro,
+    ingresos,
+    egresos,
+    recaudacion: rec,
+    pendientes,
     comprobantesGenerados: comprobantes.cantidad,
-    pagosPendientes,
+    porHora,
+    serie,
     tarifasMasUsadas,
+  };
+}
+
+function variacion(actual, anterior) {
+  const diferencia = actual - anterior;
+  const porcentaje = anterior === 0 ? null : (diferencia / anterior) * 100;
+  return { actual, anterior, diferencia, porcentaje };
+}
+
+export function dashboard(db, { desde, hasta, compararDesde, compararHasta } = {}) {
+  const principal = rangoValido(desde, hasta);
+  const actual = datosDashboard(db, principal.desde, principal.hasta);
+  let comparado = null;
+  if (compararDesde && compararHasta) {
+    const rangoComp = rangoValido(compararDesde, compararHasta);
+    comparado = datosDashboard(db, rangoComp.desde, rangoComp.hasta);
+  }
+
+  const indicadores = {
+    recaudacion: variacion(actual.recaudacion.total, comparado?.recaudacion.total || 0),
+    efectivo: variacion(actual.recaudacion.efectivo, comparado?.recaudacion.efectivo || 0),
+    transferencia: variacion(actual.recaudacion.transferencia, comparado?.recaudacion.transferencia || 0),
+    operaciones: variacion(actual.recaudacion.operaciones, comparado?.recaudacion.operaciones || 0),
+    personas: variacion(actual.ingresos.personas, comparado?.ingresos.personas || 0),
+    grupos: variacion(actual.ingresos.grupos, comparado?.ingresos.grupos || 0),
+    egresos: variacion(actual.egresos.personas, comparado?.egresos.personas || 0),
+  };
+  indicadores.promedioOperacion = variacion(
+    actual.recaudacion.operaciones ? Math.round(actual.recaudacion.total / actual.recaudacion.operaciones) : 0,
+    comparado ? (comparado.recaudacion.operaciones ? Math.round(comparado.recaudacion.total / comparado.recaudacion.operaciones) : 0) : 0,
+  );
+  indicadores.promedioPersonas = variacion(
+    actual.ingresos.grupos ? Math.round(actual.ingresos.personas / actual.ingresos.grupos * 100) / 100 : 0,
+    comparado ? (comparado.ingresos.grupos ? Math.round(comparado.ingresos.personas / comparado.ingresos.grupos * 100) / 100 : 0) : 0,
+  );
+  return {
+    periodo: principal,
+    periodoComparado: comparado ? rangoValido(compararDesde, compararHasta) : null,
+    ...actual,
+    comparado,
+    indicadores,
   };
 }
 

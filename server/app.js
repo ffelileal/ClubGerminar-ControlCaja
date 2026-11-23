@@ -11,6 +11,8 @@ import * as cobros from './services/cobros.js';
 import * as caja from './services/caja.js';
 import * as rep from './services/reportes.js';
 import { generarComprobante, rutaComprobante } from './services/comprobantes.js';
+import ExcelJS from 'exceljs';
+import PDFDocument from 'pdfkit';
 
 const COOKIE = 'sid';
 
@@ -219,7 +221,107 @@ export function crearApp(db, { backupDir, clientDir, secureCookie = false } = {}
   api.get('/caja/:id', h((req) => caja.detalleCaja(db, Number(req.params.id))));
 
   // ---- Dashboard ----
-  api.get('/dashboard', h((req) => rep.dashboard(db, [7, 30, 90].includes(Number(req.query.dias)) ? Number(req.query.dias) : 30)));
+  api.get('/dashboard', h((req) => rep.dashboard(db, {
+    desde: req.query.desde,
+    hasta: req.query.hasta,
+    compararDesde: req.query.compararDesde,
+    compararHasta: req.query.compararHasta,
+  })));
+  api.get('/dashboard/exportar', async (req, res, next) => {
+    try {
+      const datos = rep.dashboard(db, {
+        desde: req.query.desde,
+        hasta: req.query.hasta,
+        compararDesde: req.query.compararDesde,
+        compararHasta: req.query.compararHasta,
+      });
+      const nombreBase = `dashboard-${datos.periodo.desde}-${datos.periodo.hasta}`;
+      if (req.query.formato === 'csv') {
+        const csv = rep.aCSV([
+          { titulo: 'Fecha', valor: (r) => r.fecha },
+          { titulo: 'Operaciones', valor: (r) => r.operaciones },
+          { titulo: 'Personas', valor: (r) => r.personas },
+          { titulo: 'Efectivo', valor: (r) => rep.montoCSV(r.efectivo) },
+          { titulo: 'Transferencia', valor: (r) => rep.montoCSV(r.transferencia) },
+          { titulo: 'Total', valor: (r) => rep.montoCSV(r.total) },
+        ], datos.serie);
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="${nombreBase}.csv"`);
+        return res.send(csv);
+      }
+      if (req.query.formato === 'xlsx') {
+        const libro = new ExcelJS.Workbook();
+        const hoja = libro.addWorksheet('Resumen diario');
+        hoja.columns = [
+          { header: 'Fecha', key: 'fecha', width: 12 },
+          { header: 'Operaciones', key: 'operaciones', width: 14 },
+          { header: 'Personas', key: 'personas', width: 14 },
+          { header: 'Efectivo', key: 'efectivo', width: 16 },
+          { header: 'Transferencia', key: 'transferencia', width: 16 },
+          { header: 'Total', key: 'total', width: 16 },
+        ];
+        for (const r of datos.serie) hoja.addRow(r);
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.setHeader('Content-Disposition', `attachment; filename="${nombreBase}.xlsx"`);
+        await libro.xlsx.write(res);
+        return res.end();
+      }
+      if (req.query.formato === 'pdf') {
+        const pdf = new PDFDocument({ size: 'A4', margin: 40 });
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename="${nombreBase}.pdf"`);
+        pdf.pipe(res);
+        const cfg = leerConfig(db);
+        pdf.fontSize(18).text(cfg.establecimiento_nombre, { align: 'center' });
+        pdf.moveDown(0.3).fontSize(12).text(`Dashboard - ${datos.periodo.desde} al ${datos.periodo.hasta}`, { align: 'center' });
+        pdf.moveDown();
+        pdf.fontSize(11).text(`Recaudación: $ ${(datos.recaudacion.total / 100).toLocaleString('es-AR', { minimumFractionDigits: 2 })}`);
+        pdf.text(`Efectivo: $ ${(datos.recaudacion.efectivo / 100).toLocaleString('es-AR', { minimumFractionDigits: 2 })}`);
+        pdf.text(`Transferencias: $ ${(datos.recaudacion.transferencia / 100).toLocaleString('es-AR', { minimumFractionDigits: 2 })}`);
+        pdf.text(`Operaciones: ${datos.recaudacion.operaciones}`);
+        pdf.text(`Personas ingresadas: ${datos.ingresos.personas}`);
+        pdf.text(`Egresos: ${datos.egresos.personas}`);
+        if (datos.periodoComparado) pdf.text(`Comparado con: ${datos.periodoComparado.desde} al ${datos.periodoComparado.hasta}`);
+        pdf.moveDown().text(`Generado: ${new Date().toLocaleString('es-AR')}`);
+        pdf.end();
+        return;
+      }
+      throw err.validacion('Formato de exportación inválido');
+    } catch (e) { next(e); }
+  });
+  api.get('/dashboard/dia/:fecha', h((req) => {
+    const fecha = String(req.params.fecha).slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha)) throw err.validacion('Fecha inválida');
+    const base = `FROM ordenes o
+      JOIN visitas v ON v.id=o.visita_id
+      JOIN personas p ON p.id=v.persona_id
+      JOIN usuarios u ON u.id=o.operador_id
+      WHERE substr(o.fecha,1,10)=? AND o.estado='PAGADO'`;
+    const total = db.prepare(`SELECT COUNT(*) AS operaciones,
+      COALESCE(SUM(o.importe),0) AS recaudado,
+      COALESCE(SUM(CASE WHEN o.medio='EFECTIVO' THEN o.importe ELSE 0 END),0) AS efectivo,
+      COALESCE(SUM(CASE WHEN o.medio='TRANSFERENCIA' THEN o.importe ELSE 0 END),0) AS transferencia,
+      COALESCE(SUM(o.cantidad),0) AS personas
+      ${base}`).get(fecha);
+    const rows = db.prepare(`SELECT o.numero, o.fecha, o.importe, o.medio, o.estado,
+      o.referencia, o.cantidad, o.tarifa_nombre, p.dni,
+      COALESCE(o.nombre_titular,p.nombre,p.dni) AS titular,
+      u.nombre AS operador
+      ${base} ORDER BY o.numero DESC`).all(fecha).map((r) => ({
+        numero: r.numero,
+        fecha: r.fecha,
+        importe: r.importe,
+        medio: r.medio,
+        estado: r.estado,
+        referencia: r.referencia,
+        cantidad: r.cantidad,
+        tarifa: r.tarifa_nombre,
+        dni: r.dni,
+        titular: r.titular,
+        operador: r.operador,
+      }));
+    return { fecha, resumen: total, rows };
+  }));
 
   // ---- Historial + CSV ----
   const filtros = (q) => ({ desde: q.desde, hasta: q.hasta, dni: q.dni, estado: q.estado, medio: q.medio, operador: q.operador, numero: q.numero, q: q.q, caja: q.caja });

@@ -7,6 +7,7 @@ import { generarComprobante } from '../server/services/comprobantes.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { dashboard } from '../server/services/reportes.js';
 
 async function iniciar() {
   const db = abrirDB(':memory:');
